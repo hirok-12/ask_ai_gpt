@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Send, Plus, User } from 'lucide-react';
+import { Send, Plus, User, Filter } from 'lucide-react';
 import { sendDifyChatMessage, fetchDifyConversations, fetchDifyConversationMessages } from '@/lib/api';
 import { useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
@@ -21,6 +21,7 @@ interface Chat {
   title: string;
   messages: Message[];
   difyConversationId?: string; // Dify側の会話ID
+  firstMessageDate?: Date; // 最初のメッセージの日付
 }
 
 // 英語のタイトルを日本語に変換する関数
@@ -78,6 +79,9 @@ const translateToJapanese = (title: string | null | undefined): string => {
   return title;
 };
 
+// フィルタリングの種類
+type DateFilter = 'today' | 'yesterday' | 'older';
+
 export default function ChatInterface() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -86,6 +90,8 @@ export default function ChatInterface() {
   const [userId, setUserId] = useState<string | null>(null);
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [dateFilter, setDateFilter] = useState<DateFilter>('today');
+  const [filteredChats, setFilteredChats] = useState<Chat[]>([]);
   
 
   // ユーザーIDをlocalStorageで永続化
@@ -105,6 +111,57 @@ export default function ChatInterface() {
     }
   }, [userId]);
 
+  // 日付フィルタリングを適用する関数
+  const applyDateFilter = (chats: Chat[], filter: DateFilter) => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    console.log('Applying date filter:', filter);
+    console.log('Today:', today);
+    console.log('Yesterday:', yesterday);
+    console.log('Total chats:', chats.length);
+    console.log('Chats with dates:', chats.filter(c => c.firstMessageDate).length);
+
+    const filtered = chats.filter(chat => {
+      if (!chat.firstMessageDate) {
+        console.log(`Chat ${chat.id} has no firstMessageDate`);
+        return false;
+      }
+      
+      const messageDate = new Date(chat.firstMessageDate);
+      const messageDateOnly = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate());
+      
+      console.log(`Chat ${chat.id} message date:`, messageDate, 'messageDateOnly:', messageDateOnly);
+      
+      switch (filter) {
+        case 'today':
+          const isToday = messageDateOnly.getTime() === today.getTime();
+          console.log(`Chat ${chat.id} isToday:`, isToday);
+          return isToday;
+        case 'yesterday':
+          const isYesterday = messageDateOnly.getTime() === yesterday.getTime();
+          console.log(`Chat ${chat.id} isYesterday:`, isYesterday);
+          return isYesterday;
+        case 'older':
+          const isOlder = messageDateOnly.getTime() < yesterday.getTime();
+          console.log(`Chat ${chat.id} isOlder:`, isOlder);
+          return isOlder;
+        default:
+          return true;
+      }
+    });
+
+    console.log('Filtered result:', filtered.length);
+    return filtered;
+  };
+
+  // 日付フィルタが変更されたときにフィルタリングを適用
+  useEffect(() => {
+    setFilteredChats(applyDateFilter(chats, dateFilter));
+  }, [chats, dateFilter]);
+
   // 会話一覧を取得する関数
   const loadConversations = async () => {
     if (!userId) return;
@@ -120,28 +177,34 @@ export default function ChatInterface() {
           messages: [], // メッセージは後で個別に読み込む
           difyConversationId: conv.id,
         }));
-        setChats(loadedChats);
         
-        // 各会話の最初のメッセージを取得してタイトルとして設定
+        console.log('Loaded conversations:', loadedChats.length);
+        
+        // 各会話の最初のメッセージを取得してタイトルと日付として設定
         for (const chat of loadedChats) {
           try {
-            const msgResponse = await fetchDifyConversationMessages(chat.difyConversationId!, userId, 1);
+            // DifyのAPIは逆順で返されるため、最初のメッセージを取得するには
+            // 十分な数のメッセージを取得して、最後のメッセージを最初のメッセージとして扱う
+            const msgResponse = await fetchDifyConversationMessages(chat.difyConversationId!, userId, 50);
             if (msgResponse.data && msgResponse.data.length > 0) {
-              const firstMsg = msgResponse.data[0];
+              // APIは逆順で返されるため、配列の最後の要素が最初のメッセージ
+              const firstMsg = msgResponse.data[msgResponse.data.length - 1];
               if (firstMsg.query) {
-                setChats((prev) =>
-                  prev.map((c) =>
-                    c.id === chat.id
-                      ? { ...c, title: firstMsg.query.slice(0, 50) }
-                      : c
-                  )
-                );
+                const firstMessageDate = new Date(firstMsg.created_at * 1000); // Unix timestampをミリ秒に変換
+                console.log(`Chat ${chat.id} first message date:`, firstMessageDate);
+                
+                // チャットオブジェクトを直接更新
+                chat.title = firstMsg.query.slice(0, 50);
+                chat.firstMessageDate = firstMessageDate;
               }
             }
           } catch (error) {
             console.error('タイトル取得エラー:', error);
           }
         }
+        
+        console.log('Final loaded chats with dates:', loadedChats);
+        setChats(loadedChats);
       }
     } catch (error) {
       console.error('会話一覧の取得エラー:', error);
@@ -165,6 +228,7 @@ export default function ChatInterface() {
         const messages: Message[] = [];
         
         // APIレスポンスからユーザーとアシスタントのメッセージを構築
+        // DifyのAPIは逆順で返されるため、reverse()で正しい順序に並び替え
         response.data.reverse().forEach((msg: any) => {
           // ユーザーのメッセージ
           if (msg.query) {
@@ -172,7 +236,7 @@ export default function ChatInterface() {
               id: msg.id + '_query',
               text: msg.query,
               sender: 'user',
-              timestamp: new Date(msg.created_at),
+              timestamp: new Date(msg.created_at * 1000), // Unix timestampをミリ秒に変換
             });
           }
           // アシスタントのメッセージ
@@ -181,7 +245,7 @@ export default function ChatInterface() {
               id: msg.id + '_answer',
               text: msg.answer,
               sender: 'assistant',
-              timestamp: new Date(msg.created_at),
+              timestamp: new Date(msg.created_at * 1000), // Unix timestampをミリ秒に変換
             });
           }
         });
@@ -318,6 +382,69 @@ export default function ChatInterface() {
     }
   };
 
+  // フィルタリングボタンのレンダリング
+  const renderFilterButtons = () => {
+    const filters: { value: DateFilter; label: string }[] = [
+      { value: 'today', label: '今日' },
+      { value: 'yesterday', label: '昨日' },
+      { value: 'older', label: 'それ以降' }
+    ];
+
+    return (
+      <div className="px-4 py-2 border-b border-gray-300">
+        <div className="flex items-center space-x-2 mb-2">
+          <Filter className="w-4 h-4 text-gray-600" />
+          <span className="text-sm font-medium text-gray-700">日付フィルター</span>
+        </div>
+        <div className="flex space-x-1">
+          {filters.map((filter) => (
+            <Button
+              key={filter.value}
+              variant={dateFilter === filter.value ? "default" : "outline"}
+              size="sm"
+              className={`text-xs px-2 py-1 h-7 ${
+                dateFilter === filter.value
+                  ? 'bg-gray-800 text-white'
+                  : 'bg-transparent border-gray-400 text-gray-700 hover:bg-gray-300'
+              }`}
+              onClick={() => setDateFilter(filter.value)}
+            >
+              {filter.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // フィルタリング結果の件数表示
+  const renderFilterResult = () => {
+    const count = filteredChats.length;
+    let label = '';
+    
+    switch (dateFilter) {
+      case 'today':
+        label = '今日';
+        break;
+      case 'yesterday':
+        label = '昨日';
+        break;
+      case 'older':
+        label = 'それ以降';
+        break;
+    }
+    
+    return (
+      <div className="px-4 py-2 text-xs text-gray-500 border-b border-gray-300">
+        {label}: {count}件
+        <div className="text-xs text-gray-400 mt-1">
+          総チャット数: {chats.length}件 | 
+          日付あり: {chats.filter(c => c.firstMessageDate).length}件
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
@@ -332,12 +459,30 @@ export default function ChatInterface() {
             新しいチャット
           </Button>
         </div>
+        
+        {/* フィルタリングボタン */}
+        {renderFilterButtons()}
+        
+        {/* フィルタリング結果件数 */}
+        {renderFilterResult()}
+        
         {/* チャット履歴一覧 */}
         <div className="flex-1 overflow-y-auto">
           {isLoadingConversations ? (
             <div className="p-4 text-center text-gray-500">読み込み中...</div>
+          ) : filteredChats.length === 0 ? (
+            <div className="p-4 text-center text-gray-500">
+              {dateFilter === 'today' && '今日のチャットはありません'}
+              {dateFilter === 'yesterday' && '昨日のチャットはありません'}
+              {dateFilter === 'older' && 'それ以降のチャットはありません'}
+              <div className="mt-2 text-xs text-gray-400">
+                デバッグ: フィルター: {dateFilter} | 
+                総チャット: {chats.length} | 
+                日付あり: {chats.filter(c => c.firstMessageDate).length}
+              </div>
+            </div>
           ) : (
-            chats.map((chat) => (
+            filteredChats.map((chat) => (
               <div
                 key={chat.id}
                 className={`px-4 py-2 cursor-pointer hover:bg-gray-300 ${
@@ -358,6 +503,21 @@ export default function ChatInterface() {
                 }}
               >
                 <span className="truncate block max-w-full">{chat.title}</span>
+                {chat.firstMessageDate && (
+                  <span className="text-xs text-gray-500 block mt-1">
+                    {chat.firstMessageDate.toLocaleDateString('ja-JP', {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
+                  </span>
+                )}
+                {!chat.firstMessageDate && (
+                  <span className="text-xs text-red-500 block mt-1">
+                    日付なし
+                  </span>
+                )}
               </div>
             ))
           )}
